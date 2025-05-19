@@ -67,7 +67,7 @@ def setup_file_logging(log_file: str, level: str = 'INFO') -> None:
     """
     handler = logging.FileHandler(log_file)
     handler.setFormatter(structlog.stdlib.ProcessorFormatter(
-        processor=structlog.processors.JSONRenderer()
+        processor=structlog.processors.JSONRenderer(indent=4, sort_keys=True)
     ))
     
     root_logger = logging.getLogger()
@@ -83,7 +83,7 @@ def setup_console_logging(level: str = 'INFO') -> None:
     """
     handler = logging.StreamHandler()
     handler.setFormatter(structlog.stdlib.ProcessorFormatter(
-        processor=structlog.dev.ConsoleRenderer()
+        processor=structlog.dev.ConsoleRenderer(colors=False)
     ))
     
     root_logger = logging.getLogger()

@@ -1,109 +1,84 @@
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional, List
+from abc import ABC, abstractmethod
+from datetime import datetime
 import logging
 from ..utils.logging import get_logger
 from ..toolLib.tool_registry import ToolRegistry
 
-class Task:
-    """Class for workflow tasks"""
+class Task(ABC):
+    """Base class for workflow tasks"""
     
-    def __init__(self, name: str, tool: str, parameters: Dict[str, Any], dependencies: List[str] = None):
+    def __init__(self, name: str, tool: str, parameters: Dict[str, Any], dependencies: Optional[List[str]] = None):
         """
         Initialize a task
         
         Args:
             name (str): Task name
-            tool (str): Tool name
+            tool (str): Tool to use for task execution
             parameters (Dict[str, Any]): Task parameters
-            dependencies (List[str]): List of dependent task names
+            dependencies (Optional[List[str]]): List of dependent task names
         """
         self.name = name
         self.tool = tool
         self.parameters = parameters
         self.dependencies = dependencies or []
         self.logger = get_logger(f'Task.{name}')
-        self.state = {'status': 'initialized', 'start_time': None, 'end_time': None}
+        self.state = {
+            'status': 'pending',
+            'start_time': None,
+            'end_time': None,
+            'result': None,
+            'error': None
+        }
     
-    def execute(self) -> Dict[str, Any]:
+    @abstractmethod
+    def execute(self, tool_registry: 'ToolRegistry') -> Dict[str, Any]:
         """
         Execute the task
         
+        Args:
+            tool_registry (ToolRegistry): Registry of available tools
+            
         Returns:
             Dict[str, Any]: Task execution result
+            
+        Raises:
+            Exception: If task execution fails
         """
-        try:
-            self.state['status'] = 'running'
-            self.state['start_time'] = datetime.now().isoformat()
-            
-            # Get the tool instance from the registry
-            tool_instance = ToolRegistry().get_tool_instance(self.tool)
-            if not tool_instance:
-                raise ValueError(f"Tool {self.tool} not found")
-            
-            # Prepare parameters with any required substitutions
-            params = self._prepare_parameters()
-            
-            # Execute the tool
-            result = tool_instance.execute(params)
-            
-            self.state['status'] = 'completed'
-            self.state['end_time'] = datetime.now().isoformat()
-            
-            return {
-                'success': True,
-                'task': self.name,
-                'result': result,
-                'status': self.state
-            }
-            
-        except Exception as e:
-            self.logger.error(f"Task execution failed: {str(e)}")
-            self.state['status'] = 'failed'
-            self.state['end_time'] = datetime.now().isoformat()
-            return {
-                'success': False,
-                'error': str(e),
-                'task': self.name,
-                'status': self.state
-            }
+        pass
     
-    def _prepare_parameters(self) -> Dict[str, Any]:
+    def validate_dependencies(self, workflow: 'Workflow') -> bool:
         """
-        Prepare parameters with any required substitutions
+        Validate task dependencies
         
+        Args:
+            workflow (Workflow): Parent workflow
+            
         Returns:
-            Dict[str, Any]: Prepared parameters
+            bool: True if all dependencies are satisfied, False otherwise
         """
-        params = self.parameters.copy()
-        
-        # Handle parameter substitutions
-        for key, value in params.items():
-            if isinstance(value, str) and '{' in value:
-                # This is a placeholder for substitution
-                # In a full implementation, we would replace these with actual values
-                # from previous tasks or context
-                params[key] = value.format(**self._get_context())
-        
-        return params
+        for dep_name in self.dependencies:
+            dep_task = next((t for t in workflow.tasks if t.name == dep_name), None)
+            if not dep_task or dep_task.state['status'] != 'completed':
+                return False
+        return True
     
-    def _get_context(self) -> Dict[str, Any]:
+    def update_state(self, status: str, result: Optional[Any] = None, error: Optional[Exception] = None) -> None:
         """
-        Get context for parameter substitution
+        Update task state
         
-        Returns:
-            Dict[str, Any]: Context dictionary
+        Args:
+            status (str): New status
+            result (Optional[Any]): Task result
+            error (Optional[Exception]): Error if any
         """
-        # In a full implementation, this would get context from previous tasks
-        return {}
+        self.state['status'] = status
+        self.state['end_time'] = datetime.now()
+        if result:
+            self.state['result'] = result
+        if error:
+            self.state['error'] = str(error)
     
-    def validate(self) -> bool:
-        """
-        Validate the task
-        
-        Returns:
-            bool: True if task is valid, False otherwise
-        """
-        return all([
-            self.name,
-            self.tool,
-            isinstance(self.parameters, dict)
-        ])
+    def __str__(self) -> str:
+        """String representation of the task"""
+        return f"Task(name={self.name}, tool={self.tool}, status={self.state['status']})"
