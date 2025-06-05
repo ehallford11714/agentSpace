@@ -2,8 +2,8 @@ import os
 import shutil
 from pathlib import Path
 from typing import Dict, Any, Optional
-import logging
-from ..utils.logging import get_logger
+from utils.logging import get_logger
+from toolLib.tool_registry import ToolBase
 
 class FileTool(ToolBase):
     """Tool for file operations"""
@@ -107,6 +107,19 @@ class FileTool(ToolBase):
         except Exception as e:
             self.logger.error(f"Failed to move file {src} to {dest}: {str(e)}")
             return {'success': False, 'error': str(e)}
+
+    def execute(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        """Dispatch file operations based on task parameters"""
+        operation = task.get('operation')
+        if operation == 'create':
+            return self.create_file(**task)
+        if operation == 'read':
+            return self.read_file(**task)
+        if operation == 'delete':
+            return self.delete_file(**task)
+        if operation == 'move':
+            return self.move_file(**task)
+        return {'success': False, 'error': 'Unknown operation'}
     
     def validate(self, task: Dict[str, Any]) -> bool:
         """

@@ -1,34 +1,29 @@
 from typing import Dict, Any, Optional, List
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from datetime import datetime
-import logging
-from ..utils.logging import get_logger
-from ..toolLib.tool_registry import ToolRegistry
+from utils.logging import get_logger
+from toolLib.tool_registry import ToolRegistry
 
+@dataclass
 class Task(ABC):
     """Base class for workflow tasks"""
-    
-    def __init__(self, name: str, tool: str, parameters: Dict[str, Any], dependencies: Optional[List[str]] = None):
-        """
-        Initialize a task
-        
-        Args:
-            name (str): Task name
-            tool (str): Tool to use for task execution
-            parameters (Dict[str, Any]): Task parameters
-            dependencies (Optional[List[str]]): List of dependent task names
-        """
-        self.name = name
-        self.tool = tool
-        self.parameters = parameters
-        self.dependencies = dependencies or []
-        self.logger = get_logger(f'Task.{name}')
+
+    name: str
+    tool: str
+    parameters: Dict[str, Any]
+    dependencies: Optional[List[str]] = field(default_factory=list)
+    logger: Any = field(init=False)
+    state: Dict[str, Any] = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.logger = get_logger(f'Task.{self.name}')
         self.state = {
             'status': 'pending',
             'start_time': None,
             'end_time': None,
             'result': None,
-            'error': None
+            'error': None,
         }
     
     @abstractmethod

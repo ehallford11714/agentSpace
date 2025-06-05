@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 import logging
-from ..utils.logging import get_logger
+from utils.logging import get_logger
 
 class BaseAgent(ABC):
     """Base class for all agents"""

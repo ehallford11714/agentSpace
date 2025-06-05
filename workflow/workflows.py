@@ -1,24 +1,31 @@
 from typing import Dict, Any, List, Optional
 from datetime import datetime
-import logging
-from ..utils.logging import get_logger
+from dataclasses import dataclass, field
+from utils.logging import get_logger
+from toolLib.tool_registry import ToolRegistry
+from workflow.tasks import Task
 
+@dataclass
 class Workflow:
     """Class for managing workflows"""
+
+    name: str
+    tool_registry: Optional[ToolRegistry] = None
+    tasks: List[Task] = field(default_factory=list)
+    logger: Any = field(init=False)
+    state: Dict[str, Any] = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.logger = get_logger(f'Workflow.{self.name}')
+        self.state = {
+            'status': 'initialized',
+            'start_time': None,
+            'end_time': None,
+        }
+        if self.tool_registry is None:
+            self.tool_registry = ToolRegistry()
     
-    def __init__(self, name: str):
-        """
-        Initialize a workflow
-        
-        Args:
-            name (str): Workflow name
-        """
-        self.name = name
-        self.tasks: List[Task] = []
-        self.logger = get_logger(f'Workflow.{name}')
-        self.state = {'status': 'initialized', 'start_time': None, 'end_time': None}
-    
-    def add_task(self, task: 'Task') -> None:
+    def add_task(self, task: Task) -> None:
         """
         Add a task to the workflow
         
@@ -42,7 +49,7 @@ class Workflow:
             results = {}
             for task in self.tasks:
                 self.logger.info(f"Executing task {task.name}")
-                task_result = task.execute()
+                task_result = task.execute(self.tool_registry)
                 results[task.name] = task_result
                 
                 # Update state with task results

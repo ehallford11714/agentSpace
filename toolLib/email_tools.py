@@ -4,8 +4,8 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
 from typing import Dict, Any, List
-import logging
-from ..utils.logging import get_logger
+from utils.logging import get_logger
+from toolLib.tool_registry import ToolBase
 
 class EmailTool(ToolBase):
     """Tool for email operations"""
