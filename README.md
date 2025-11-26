@@ -12,9 +12,9 @@ agentic framework for parsing agents
   agents.
 - **Hugging Face dataset agent**: `python examples/hf_dataset_agent.py` now
   defaults to the public `buio/heart-disease` dataset so you can see an
-  end-to-end retrieval → EDA → cleaning → model-building pass with an accuracy
-  printout on the held-out set. You can still provide a different dataset,
-  config, and split via CLI args (e.g., `python examples/hf_dataset_agent.py
+  end-to-end retrieval → EDA → cleaning → AutoML model search pass with a
+  leaderboard and held-out accuracy printout. You can still provide a different
+  dataset, config, and split via CLI args (e.g., `python examples/hf_dataset_agent.py
   ag_news None train`). Requires `pip install datasets scikit-learn`.
 - **Module entrypoint**: `python __main__.py` runs the Hugging Face dataset agent by
   default.

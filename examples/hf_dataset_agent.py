@@ -25,9 +25,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from sklearn import metrics
 from sklearn.compose import ColumnTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
+from sklearn.svm import LinearSVC, LinearSVR
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder
 
 
@@ -93,12 +95,20 @@ class CleaningReport(BaseModel):
     remaining_missing: Dict[str, int] = Field(default_factory=dict)
 
 
+class CandidateScore(BaseModel):
+    name: str
+    metric_name: str
+    metric_value: float
+    notes: List[str] = Field(default_factory=list)
+
+
 class ModelReport(BaseModel):
     model_type: str
     target_column: str
     feature_columns: List[str]
     metric_name: str
     metric_value: float
+    leaderboard: List[CandidateScore] = Field(default_factory=list)
     notes: List[str] = Field(default_factory=list)
 
 
@@ -536,7 +546,7 @@ class ModelBuilderNet:
     TARGET_CANDIDATES = ["label", "labels", "target", "class"]
 
     def run(self, pivot: DatasetPivot, dataset: Dataset) -> DatasetPivot:
-        print("🤖 [ModelBuilder] Training baseline model...")
+        print("🤖 [ModelBuilder] Running lightweight AutoML search...")
 
         df = (
             pivot.cleaned_dataframe
@@ -558,72 +568,97 @@ class ModelBuilderNet:
             pivot.model_report = None
             print("❌ [ModelBuilder] No feature columns available after selecting target.")
             return pivot
+
         X = df[feature_columns]
         y = df[target_column]
-
-        text_columns = [col for col in feature_columns if pd.api.types.is_object_dtype(X[col])]
+        is_classification = self._is_classification_target(y)
         numeric_columns = [col for col in feature_columns if pd.api.types.is_numeric_dtype(X[col])]
+        categorical_columns = [col for col in feature_columns if col not in numeric_columns]
+        text_columns = [col for col in categorical_columns if pd.api.types.is_object_dtype(X[col])]
+
+        leaderboard: List[CandidateScore] = []
         notes: List[str] = []
 
         if text_columns:
             text_col = text_columns[0]
             notes.append(f"Using text column '{text_col}' for TF-IDF features.")
             y_encoded, label_encoder = self._encode_labels(y)
-            model = LogisticRegression(max_iter=200)
-            pipeline = Pipeline(
-                steps=[
-                    ("vectorizer", TfidfVectorizer()),
-                    ("clf", model),
-                ]
-            )
-
             X_train, X_test, y_train, y_test = train_test_split(
                 X[text_col].astype(str), y_encoded, test_size=0.2, random_state=42
             )
-            pipeline.fit(X_train, y_train)
-            preds = pipeline.predict(X_test)
-            accuracy = float(metrics.accuracy_score(y_test, preds))
-            metric_name = "accuracy"
-            metric_value = accuracy
-        else:
-            # Fallback to numeric/categorical modeling
-            categorical_columns = [col for col in feature_columns if col not in numeric_columns]
+
+            text_candidates = {
+                "logreg_text": LogisticRegression(max_iter=400) if is_classification else None,
+                "svm_text": LinearSVC() if is_classification else None,
+                "linear_reg_text": LinearSVR() if not is_classification else None,
+            }
+
+            for name, model in text_candidates.items():
+                if model is None:
+                    continue
+                pipeline = Pipeline([
+                    ("vectorizer", TfidfVectorizer()),
+                    ("clf", model),
+                ])
+                metric_name = "accuracy" if is_classification else "r2"
+                metric_value, score_notes = self._fit_and_score_text_model(
+                    pipeline, X_train, X_test, y_train, y_test, metric_name
+                )
+                leaderboard.append(
+                    CandidateScore(name=name, metric_name=metric_name, metric_value=metric_value, notes=score_notes)
+                )
+        if numeric_columns or categorical_columns:
+            y_encoded, label_encoder = self._encode_labels(y) if is_classification else (y.astype(float), None)
+            metric_name = "accuracy" if is_classification else "r2"
+
             preprocessor = ColumnTransformer(
                 transformers=[
                     ("num", "passthrough", numeric_columns),
-                    ("cat", OneHotEncoder(handle_unknown="ignore"), categorical_columns),
+                    (
+                        "cat",
+                        self._one_hot_encoder(),
+                        categorical_columns,
+                    ),
                 ]
             )
 
-            if self._is_classification_target(y):
-                y_encoded, label_encoder = self._encode_labels(y)
-                model = LogisticRegression(max_iter=200)
-                metric_name = "accuracy"
-                metric_fn = metrics.accuracy_score
-                notes.append("Classification detected; using LogisticRegression.")
-            else:
-                y_encoded = y.astype(float)
-                label_encoder = None
-                model = LinearRegression()
-                metric_name = "r2"
-                metric_fn = metrics.r2_score
-                notes.append("Regression detected; using LinearRegression.")
+            structured_candidates = {
+                "logreg": LogisticRegression(max_iter=400) if is_classification else None,
+                "random_forest": self._make_random_forest_classifier() if is_classification else self._make_random_forest_regressor(),
+                "linear": LinearRegression() if not is_classification else None,
+            }
 
-            clf = Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
             X_train, X_test, y_train, y_test = train_test_split(X, y_encoded, test_size=0.2, random_state=42)
-            clf.fit(X_train, y_train)
-            preds = clf.predict(X_test)
-            if label_encoder:
-                preds = np.round(preds).astype(int)
-                preds = np.clip(preds, 0, len(label_encoder.classes_) - 1)
-            metric_value = float(metric_fn(y_test, preds))
+
+            for name, model in structured_candidates.items():
+                if model is None:
+                    continue
+                pipeline = Pipeline([
+                    ("preprocess", preprocessor),
+                    ("model", model),
+                ])
+                metric_value, score_notes = self._fit_and_score_structured_model(
+                    pipeline, X_train, X_test, y_train, y_test, metric_name, label_encoder
+                )
+                leaderboard.append(
+                    CandidateScore(name=name, metric_name=metric_name, metric_value=metric_value, notes=score_notes)
+                )
+
+        if not leaderboard:
+            pivot.status = "failed"
+            pivot.model_report = None
+            print("❌ [ModelBuilder] AutoML search produced no candidates.")
+            return pivot
+
+        best_candidate = max(leaderboard, key=lambda c: c.metric_value)
 
         pivot.model_report = ModelReport(
-            model_type="text-logreg" if text_columns else ("logreg" if self._is_classification_target(y) else "linreg"),
+            model_type=best_candidate.name,
             target_column=target_column,
             feature_columns=feature_columns,
-            metric_name=metric_name,
-            metric_value=metric_value,
+            metric_name=best_candidate.metric_name,
+            metric_value=best_candidate.metric_value,
+            leaderboard=leaderboard,
             notes=notes,
         )
 
@@ -633,7 +668,7 @@ class ModelBuilderNet:
         pivot.action_log.append(
             ActionLog(
                 step_id=len(pivot.action_log) + 1,
-                code_executed="train_test_split + baseline model",
+                code_executed="train_test_split + AutoML leaderboard",
                 success=True,
                 rows_affected=len(df),
             )
@@ -663,6 +698,68 @@ class ModelBuilderNet:
             return True
         unique_values = series.nunique(dropna=True)
         return unique_values <= 20
+
+    def _fit_and_score_text_model(
+        self,
+        pipeline: Pipeline,
+        X_train: pd.Series,
+        X_test: pd.Series,
+        y_train: np.ndarray,
+        y_test: np.ndarray,
+        metric_name: str,
+    ) -> Tuple[float, List[str]]:
+        pipeline.fit(X_train, y_train)
+        preds = pipeline.predict(X_test)
+        score = (
+            float(metrics.accuracy_score(y_test, preds))
+            if metric_name == "accuracy"
+            else float(metrics.r2_score(y_test, preds))
+        )
+        return score, [f"Scored {score:.3f} using {metric_name}."]
+
+    def _fit_and_score_structured_model(
+        self,
+        pipeline: Pipeline,
+        X_train: pd.DataFrame,
+        X_test: pd.DataFrame,
+        y_train: np.ndarray,
+        y_test: np.ndarray,
+        metric_name: str,
+        label_encoder: Optional[LabelEncoder],
+    ) -> Tuple[float, List[str]]:
+        pipeline.fit(X_train, y_train)
+        preds = pipeline.predict(X_test)
+        if label_encoder:
+            preds = np.round(preds).astype(int)
+            preds = np.clip(preds, 0, len(label_encoder.classes_) - 1)
+        score = (
+            float(metrics.accuracy_score(y_test, preds))
+            if metric_name == "accuracy"
+            else float(metrics.r2_score(y_test, preds))
+        )
+        return score, [f"Scored {score:.3f} using {metric_name}."]
+
+    def _make_random_forest_classifier(self) -> RandomForestClassifier:
+        return RandomForestClassifier(
+            n_estimators=200,
+            random_state=42,
+            max_depth=None,
+            min_samples_leaf=2,
+        )
+
+    def _one_hot_encoder(self) -> OneHotEncoder:
+        try:
+            return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+        except TypeError:  # Backwards compatibility for older sklearn
+            return OneHotEncoder(handle_unknown="ignore", sparse=False)
+
+    def _make_random_forest_regressor(self) -> RandomForestRegressor:
+        return RandomForestRegressor(
+            n_estimators=200,
+            random_state=42,
+            max_depth=None,
+            min_samples_leaf=2,
+        )
 
 
 # ==========================================
@@ -769,6 +866,12 @@ def main(
             f"Model: {pivot.model_report.model_type} | Target: {pivot.model_report.target_column} | "
             f"Metric ({pivot.model_report.metric_name}): {pivot.model_report.metric_value:.3f}"
         )
+        if pivot.model_report.leaderboard:
+            print("Leaderboard:")
+            for candidate in sorted(
+                pivot.model_report.leaderboard, key=lambda c: c.metric_value, reverse=True
+            ):
+                print(f"- {candidate.name}: {candidate.metric_value:.3f} {candidate.metric_name}")
         if pivot.model_report.notes:
             print("Notes:")
             for note in pivot.model_report.notes:
