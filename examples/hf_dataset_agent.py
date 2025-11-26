@@ -18,9 +18,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 from datasets import Dataset, get_dataset_config_names, get_dataset_split_names, load_dataset
 from pydantic import BaseModel, ConfigDict, Field
+from sklearn import metrics
+from sklearn.compose import ColumnTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import LabelEncoder, OneHotEncoder
 
 
 # ==========================================
@@ -75,6 +83,20 @@ class EDAReport(BaseModel):
     insights: List[str] = Field(default_factory=list)
 
 
+class CleaningReport(BaseModel):
+    operations: List[str] = Field(default_factory=list)
+    remaining_missing: Dict[str, int] = Field(default_factory=dict)
+
+
+class ModelReport(BaseModel):
+    model_type: str
+    target_column: str
+    feature_columns: List[str]
+    metric_name: str
+    metric_value: float
+    notes: List[str] = Field(default_factory=list)
+
+
 class DatasetPivot(BaseModel):
     """Single source of truth for the dataset retrieval agents."""
 
@@ -86,8 +108,12 @@ class DatasetPivot(BaseModel):
     available_splits: Dict[str, List[str]] = Field(default_factory=dict)
 
     dataset_obj: Optional[Dataset] = Field(default=None, exclude=True)
+    raw_dataframe: Optional[pd.DataFrame] = Field(default=None, exclude=True)
+    cleaned_dataframe: Optional[pd.DataFrame] = Field(default=None, exclude=True)
     dataset: Optional[DatasetSnapshot] = None
     eda_report: Optional[EDAReport] = None
+    cleaning_report: Optional[CleaningReport] = None
+    model_report: Optional[ModelReport] = None
     known_issues: List[Issue] = Field(default_factory=list)
     current_plan: Optional[PlanStep] = None
     action_log: List[ActionLog] = Field(default_factory=list)
@@ -198,6 +224,12 @@ class StrategistNet:
         elif issue.issue_type == "eda_pending":
             description = "Run exploratory data analysis on the retrieved split."
             action = "run_eda"
+        elif issue.issue_type == "cleaning_pending":
+            description = "Cleanse the dataset with type coercion and imputation."
+            action = "run_cleaning"
+        elif issue.issue_type == "modeling_pending":
+            description = "Train a simple model with a train/test split and report accuracy."
+            action = "run_modeling"
         elif issue.issue_type == "repo_not_found":
             description = "Stop because the dataset repository is unavailable."
             action = "abort"
@@ -253,12 +285,21 @@ class OperatorNet:
                     columns=list(dataset.features.keys()),
                 )
                 pivot.dataset_obj = dataset
+                pivot.raw_dataframe = dataset.to_pandas()
                 code = "dataset = load_dataset(...); optional select(sample_size)"
                 pivot.status = "auditing"
             elif plan.action_type == "run_eda":
                 dataset = dataset  # carry forward existing dataset reference
                 code = "trigger_eda"
                 pivot.status = "analyzing"
+            elif plan.action_type == "run_cleaning":
+                dataset = dataset  # use existing reference
+                code = "trigger_cleaning"
+                pivot.status = "cleansing"
+            elif plan.action_type == "run_modeling":
+                dataset = dataset
+                code = "trigger_modeling"
+                pivot.status = "modeling"
             else:
                 code = "abort"
                 pivot.status = "failed"
@@ -384,8 +425,17 @@ class EdaNet:
         )
 
         pivot.known_issues = [issue for issue in pivot.known_issues if issue.issue_type != "eda_pending"]
+        if not any(issue.issue_type == "cleaning_pending" for issue in pivot.known_issues):
+            pivot.known_issues.append(
+                Issue(
+                    id="issue_cleaning",
+                    issue_type="cleaning_pending",
+                    severity="medium",
+                    description="Dataset has not been cleansed for modeling.",
+                )
+            )
         pivot.current_plan = None
-        pivot.status = "completed"
+        pivot.status = "planning"
 
         pivot.action_log.append(
             ActionLog(
@@ -398,6 +448,216 @@ class EdaNet:
 
         print("✅ [EDA] Analysis complete; insights ready in pivot.\n")
         return pivot
+
+
+class CleanserNet:
+    """Cleaner: apply lightweight type coercion and imputation for modeling."""
+
+    def run(self, pivot: DatasetPivot, dataset: Dataset) -> DatasetPivot:
+        print("🧹 [Cleaner] Harmonizing dataframe for modeling...")
+
+        df = (
+            pivot.cleaned_dataframe
+            if pivot.cleaned_dataframe is not None
+            else pivot.raw_dataframe
+            if pivot.raw_dataframe is not None
+            else dataset.to_pandas()
+        )
+        working_df = df.copy()
+        operations: List[str] = []
+
+        # Attempt numeric coercion for object columns that look numeric
+        for column in working_df.columns:
+            series = working_df[column]
+            if pd.api.types.is_object_dtype(series):
+                coerced = pd.to_numeric(series, errors="coerce")
+                non_null_ratio = coerced.notnull().mean()
+                if non_null_ratio >= 0.7:
+                    working_df[column] = coerced
+                    operations.append(
+                        f"Coerced column '{column}' to numeric (kept {non_null_ratio:.0%} non-null)."
+                    )
+
+        # Impute missing values
+        for column in working_df.columns:
+            series = working_df[column]
+            if series.isnull().any():
+                if pd.api.types.is_numeric_dtype(series):
+                    fill_value = series.median()
+                    working_df[column].fillna(fill_value, inplace=True)
+                    operations.append(f"Filled numeric missing values in '{column}' with median {fill_value}.")
+                else:
+                    mode = series.mode(dropna=True)
+                    if not mode.empty:
+                        fill_value = mode.iloc[0]
+                        working_df[column].fillna(fill_value, inplace=True)
+                        operations.append(f"Filled categorical missing values in '{column}' with mode '{fill_value}'.")
+
+        pivot.cleaned_dataframe = working_df
+        pivot.cleaning_report = CleaningReport(
+            operations=operations or ["No cleaning operations required."],
+            remaining_missing=working_df.isnull().sum().to_dict(),
+        )
+
+        pivot.known_issues = [issue for issue in pivot.known_issues if issue.issue_type != "cleaning_pending"]
+        if not any(issue.issue_type == "modeling_pending" for issue in pivot.known_issues):
+            pivot.known_issues.append(
+                Issue(
+                    id="issue_modeling",
+                    issue_type="modeling_pending",
+                    severity="medium",
+                    description="Dataset is cleansed but not yet modeled.",
+                )
+            )
+
+        pivot.current_plan = None
+        pivot.status = "planning"
+        pivot.action_log.append(
+            ActionLog(
+                step_id=len(pivot.action_log) + 1,
+                code_executed="type coercion + median/mode imputation",
+                success=True,
+                rows_affected=len(working_df),
+            )
+        )
+
+        print("✅ [Cleaner] Dataset prepared; modeling can proceed.\n")
+        return pivot
+
+
+class ModelBuilderNet:
+    """Builder: train a baseline model with a train/test split."""
+
+    TARGET_CANDIDATES = ["label", "labels", "target", "class"]
+
+    def run(self, pivot: DatasetPivot, dataset: Dataset) -> DatasetPivot:
+        print("🤖 [ModelBuilder] Training baseline model...")
+
+        df = (
+            pivot.cleaned_dataframe
+            if pivot.cleaned_dataframe is not None
+            else pivot.raw_dataframe
+            if pivot.raw_dataframe is not None
+            else dataset.to_pandas()
+        )
+        target_column = self._choose_target(df)
+        if target_column is None:
+            pivot.status = "failed"
+            pivot.model_report = None
+            print("❌ [ModelBuilder] Could not determine a target column for modeling.")
+            return pivot
+
+        feature_columns = [col for col in df.columns if col != target_column]
+        if not feature_columns:
+            pivot.status = "failed"
+            pivot.model_report = None
+            print("❌ [ModelBuilder] No feature columns available after selecting target.")
+            return pivot
+        X = df[feature_columns]
+        y = df[target_column]
+
+        text_columns = [col for col in feature_columns if pd.api.types.is_object_dtype(X[col])]
+        numeric_columns = [col for col in feature_columns if pd.api.types.is_numeric_dtype(X[col])]
+        notes: List[str] = []
+
+        if text_columns:
+            text_col = text_columns[0]
+            notes.append(f"Using text column '{text_col}' for TF-IDF features.")
+            y_encoded, label_encoder = self._encode_labels(y)
+            model = LogisticRegression(max_iter=200)
+            pipeline = Pipeline(
+                steps=[
+                    ("vectorizer", TfidfVectorizer()),
+                    ("clf", model),
+                ]
+            )
+
+            X_train, X_test, y_train, y_test = train_test_split(
+                X[text_col].astype(str), y_encoded, test_size=0.2, random_state=42
+            )
+            pipeline.fit(X_train, y_train)
+            preds = pipeline.predict(X_test)
+            accuracy = float(metrics.accuracy_score(y_test, preds))
+            metric_name = "accuracy"
+            metric_value = accuracy
+        else:
+            # Fallback to numeric/categorical modeling
+            categorical_columns = [col for col in feature_columns if col not in numeric_columns]
+            preprocessor = ColumnTransformer(
+                transformers=[
+                    ("num", "passthrough", numeric_columns),
+                    ("cat", OneHotEncoder(handle_unknown="ignore"), categorical_columns),
+                ]
+            )
+
+            if self._is_classification_target(y):
+                y_encoded, label_encoder = self._encode_labels(y)
+                model = LogisticRegression(max_iter=200)
+                metric_name = "accuracy"
+                metric_fn = metrics.accuracy_score
+                notes.append("Classification detected; using LogisticRegression.")
+            else:
+                y_encoded = y.astype(float)
+                label_encoder = None
+                model = LinearRegression()
+                metric_name = "r2"
+                metric_fn = metrics.r2_score
+                notes.append("Regression detected; using LinearRegression.")
+
+            clf = Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
+            X_train, X_test, y_train, y_test = train_test_split(X, y_encoded, test_size=0.2, random_state=42)
+            clf.fit(X_train, y_train)
+            preds = clf.predict(X_test)
+            if label_encoder:
+                preds = np.round(preds).astype(int)
+                preds = np.clip(preds, 0, len(label_encoder.classes_) - 1)
+            metric_value = float(metric_fn(y_test, preds))
+
+        pivot.model_report = ModelReport(
+            model_type="text-logreg" if text_columns else ("logreg" if self._is_classification_target(y) else "linreg"),
+            target_column=target_column,
+            feature_columns=feature_columns,
+            metric_name=metric_name,
+            metric_value=metric_value,
+            notes=notes,
+        )
+
+        pivot.known_issues = [issue for issue in pivot.known_issues if issue.issue_type != "modeling_pending"]
+        pivot.current_plan = None
+        pivot.status = "completed"
+        pivot.action_log.append(
+            ActionLog(
+                step_id=len(pivot.action_log) + 1,
+                code_executed="train_test_split + baseline model",
+                success=True,
+                rows_affected=len(df),
+            )
+        )
+
+        print(
+            f"✅ [ModelBuilder] Training complete. {pivot.model_report.metric_name}: "
+            f"{pivot.model_report.metric_value:.3f} on held-out set.\n"
+        )
+        return pivot
+
+    def _choose_target(self, df: pd.DataFrame) -> Optional[str]:
+        for candidate in self.TARGET_CANDIDATES:
+            if candidate in df.columns:
+                return candidate
+        return df.columns[-1] if len(df.columns) > 1 else None
+
+    def _encode_labels(self, series: pd.Series) -> Tuple[np.ndarray, Optional[LabelEncoder]]:
+        if pd.api.types.is_numeric_dtype(series):
+            return series.to_numpy(), None
+        encoder = LabelEncoder()
+        encoded = encoder.fit_transform(series.astype(str))
+        return encoded, encoder
+
+    def _is_classification_target(self, series: pd.Series) -> bool:
+        if not pd.api.types.is_numeric_dtype(series):
+            return True
+        unique_values = series.nunique(dropna=True)
+        return unique_values <= 20
 
 
 # ==========================================
@@ -416,10 +676,12 @@ def run_stella_loop(request: DatasetRequest) -> Tuple[Optional[Dataset], Dataset
     operator = OperatorNet()
     auditor = AuditorNet()
     analyst = EdaNet()
+    cleaner = CleanserNet()
+    model_builder = ModelBuilderNet()
 
     dataset: Optional[Dataset] = None
     steps = 0
-    max_steps = 12
+    max_steps = 18
 
     print(f"🚀 HF Agent initialized for repo '{request.repo_id}'.\n")
 
@@ -442,6 +704,20 @@ def run_stella_loop(request: DatasetRequest) -> Tuple[Optional[Dataset], Dataset
                 print("❌ [EDA] No dataset available for analysis.")
             else:
                 pivot = analyst.run(active_dataset, pivot)
+        elif pivot.status == "cleansing":
+            active_dataset = dataset or pivot.dataset_obj
+            if active_dataset is None:
+                pivot.status = "failed"
+                print("❌ [Cleaner] No dataset available for cleansing.")
+            else:
+                pivot = cleaner.run(pivot, active_dataset)
+        elif pivot.status == "modeling":
+            active_dataset = dataset or pivot.dataset_obj
+            if active_dataset is None:
+                pivot.status = "failed"
+                print("❌ [ModelBuilder] No dataset available for modeling.")
+            else:
+                pivot = model_builder.run(pivot, active_dataset)
 
     if pivot.status == "completed":
         print("\n✨ Dataset retrieved successfully!")
@@ -468,6 +744,25 @@ def main(repo_id: str = "ag_news", config: Optional[str] = None, split: str = "t
         print("\n--- EDA Insights ---")
         for insight in pivot.eda_report.insights:
             print(f"- {insight}")
+
+    if pivot.cleaning_report is not None:
+        print("\n--- Cleaning Operations ---")
+        for op in pivot.cleaning_report.operations:
+            print(f"- {op}")
+        print("Remaining missing values:")
+        for col, count in pivot.cleaning_report.remaining_missing.items():
+            print(f"  {col}: {count}")
+
+    if pivot.model_report is not None:
+        print("\n--- Model Report ---")
+        print(
+            f"Model: {pivot.model_report.model_type} | Target: {pivot.model_report.target_column} | "
+            f"Metric ({pivot.model_report.metric_name}): {pivot.model_report.metric_value:.3f}"
+        )
+        if pivot.model_report.notes:
+            print("Notes:")
+            for note in pivot.model_report.notes:
+                print(f"- {note}")
 
     print("\n--- Action Log ---")
     for log in pivot.action_log:
