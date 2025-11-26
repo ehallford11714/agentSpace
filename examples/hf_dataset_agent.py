@@ -6,8 +6,8 @@ split, execute the download, and audit the result. The agents share a pivot
 object that acts as the single source of truth for decisions and logs.
 
 Usage:
-    python examples/hf_dataset_agent.py           # uses ag_news train split sample
-    python examples/hf_dataset_agent.py imdb test # different dataset and split
+    python examples/hf_dataset_agent.py                     # uses Heart Disease train split
+    python examples/hf_dataset_agent.py ag_news None train  # different dataset and split
 
 Dependencies:
     pip install datasets
@@ -75,10 +75,15 @@ class DatasetSnapshot(BaseModel):
     columns: List[str]
 
 
+class CorrelationEntry(BaseModel):
+    pair: str
+    pearson: float
+
+
 class EDAReport(BaseModel):
     descriptive_stats: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     missing_counts: Dict[str, int] = Field(default_factory=dict)
-    correlations: List[Dict[str, float]] = Field(default_factory=list)
+    correlations: List[CorrelationEntry] = Field(default_factory=list)
     distributions: Dict[str, Dict[str, float]] = Field(default_factory=dict)
     insights: List[str] = Field(default_factory=list)
 
@@ -382,13 +387,13 @@ class EdaNet:
 
         missing_counts = df.isnull().sum().to_dict()
 
-        correlations: List[Dict[str, float]] = []
+        correlations: List[CorrelationEntry] = []
         corr_matrix = df.select_dtypes(include=["number", "bool"]).corr(numeric_only=True)
         for i, col_i in enumerate(corr_matrix.columns):
             for col_j in corr_matrix.columns[i + 1 :]:
                 value = corr_matrix.loc[col_i, col_j]
                 if pd.notna(value):
-                    correlations.append({"pair": f"{col_i}~{col_j}", "pearson": float(value)})
+                    correlations.append(CorrelationEntry(pair=f"{col_i}~{col_j}", pearson=float(value)))
 
         distributions: Dict[str, Dict[str, float]] = {}
         for column in df.columns:
@@ -405,9 +410,9 @@ class EdaNet:
                 insights.append(f"Column '{column}' has {count} missing values.")
 
         for corr in correlations:
-            if abs(corr["pearson"]) >= 0.5:
+            if abs(corr.pearson) >= 0.5:
                 insights.append(
-                    f"Strong correlation detected between {corr['pair']} (pearson={corr['pearson']:.2f})."
+                    f"Strong correlation detected between {corr.pair} (pearson={corr.pearson:.2f})."
                 )
 
         for column in df.select_dtypes(include=["number", "bool"]).columns:
@@ -732,7 +737,12 @@ def run_stella_loop(request: DatasetRequest) -> Tuple[Optional[Dataset], Dataset
 # ==========================================
 
 
-def main(repo_id: str = "ag_news", config: Optional[str] = None, split: str = "train", sample_size: int = 200):
+def main(
+    repo_id: str = "buio/heart-disease",
+    config: Optional[str] = None,
+    split: str = "train",
+    sample_size: int = 400,
+):
     request = DatasetRequest(repo_id=repo_id, config=config, split=split, sample_size=sample_size)
     dataset, pivot = run_stella_loop(request)
 
@@ -772,7 +782,8 @@ def main(repo_id: str = "ag_news", config: Optional[str] = None, split: str = "t
 if __name__ == "__main__":
     import sys
 
-    repo = sys.argv[1] if len(sys.argv) > 1 else "ag_news"
+    repo = sys.argv[1] if len(sys.argv) > 1 else "buio/heart-disease"
     cfg = sys.argv[2] if len(sys.argv) > 2 else None
     split = sys.argv[3] if len(sys.argv) > 3 else "train"
-    main(repo, cfg, split)
+    sample = int(sys.argv[4]) if len(sys.argv) > 4 else 400
+    main(repo, cfg, split, sample)
