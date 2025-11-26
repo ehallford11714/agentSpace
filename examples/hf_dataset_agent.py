@@ -16,6 +16,7 @@ Dependencies:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import product
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -25,7 +26,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from sklearn import metrics
 from sklearn.compose import ColumnTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.ensemble import (
+    GradientBoostingClassifier,
+    GradientBoostingRegressor,
+    RandomForestClassifier,
+    RandomForestRegressor,
+    VotingClassifier,
+    VotingRegressor,
+)
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
@@ -578,6 +586,8 @@ class ModelBuilderNet:
 
         leaderboard: List[CandidateScore] = []
         notes: List[str] = []
+        best_structured_params: Dict[str, Dict[str, Any]] = {}
+        best_structured_factories: Dict[str, Any] = {}
 
         if text_columns:
             text_col = text_columns[0]
@@ -587,26 +597,53 @@ class ModelBuilderNet:
                 X[text_col].astype(str), y_encoded, test_size=0.2, random_state=42
             )
 
-            text_candidates = {
-                "logreg_text": LogisticRegression(max_iter=400) if is_classification else None,
-                "svm_text": LinearSVC() if is_classification else None,
-                "linear_reg_text": LinearSVR() if not is_classification else None,
-            }
+            text_candidates: Dict[str, Tuple[Any, Dict[str, List[Any]]]] = {}
+            if is_classification:
+                text_candidates.update(
+                    {
+                        "logreg_text": (
+                            LogisticRegression,
+                            {"C": [0.5, 1.0, 2.0], "max_iter": [300, 600]},
+                        ),
+                        "svm_text": (
+                            LinearSVC,
+                            {"C": [0.5, 1.0], "loss": ["hinge", "squared_hinge"]},
+                        ),
+                    }
+                )
+            else:
+                text_candidates["linear_reg_text"] = (
+                    LinearSVR,
+                    {"C": [0.5, 1.0], "epsilon": [0.0, 0.1]},
+                )
 
-            for name, model in text_candidates.items():
-                if model is None:
-                    continue
-                pipeline = Pipeline([
-                    ("vectorizer", TfidfVectorizer()),
-                    ("clf", model),
-                ])
-                metric_name = "accuracy" if is_classification else "r2"
-                metric_value, score_notes = self._fit_and_score_text_model(
-                    pipeline, X_train, X_test, y_train, y_test, metric_name
-                )
-                leaderboard.append(
-                    CandidateScore(name=name, metric_name=metric_name, metric_value=metric_value, notes=score_notes)
-                )
+            for name, (factory, param_grid) in text_candidates.items():
+                best_metric = float("-inf")
+                best_params: Dict[str, Any] = {}
+                best_notes: List[str] = []
+                for params in self._iter_param_grid(param_grid):
+                    model = factory(**params)
+                    pipeline = Pipeline([
+                        ("vectorizer", TfidfVectorizer()),
+                        ("clf", model),
+                    ])
+                    metric_name = "accuracy" if is_classification else "r2"
+                    metric_value, score_notes = self._fit_and_score_text_model(
+                        pipeline, X_train, X_test, y_train, y_test, metric_name
+                    )
+                    if metric_value > best_metric:
+                        best_metric = metric_value
+                        best_params = params
+                        best_notes = score_notes
+                if best_metric > float("-inf"):
+                    leaderboard.append(
+                        CandidateScore(
+                            name=name,
+                            metric_name=metric_name,
+                            metric_value=best_metric,
+                            notes=best_notes + [f"Params: {best_params or 'default'}"],
+                        )
+                    )
         if numeric_columns or categorical_columns:
             y_encoded, label_encoder = self._encode_labels(y) if is_classification else (y.astype(float), None)
             metric_name = "accuracy" if is_classification else "r2"
@@ -622,27 +659,129 @@ class ModelBuilderNet:
                 ]
             )
 
-            structured_candidates = {
-                "logreg": LogisticRegression(max_iter=400) if is_classification else None,
-                "random_forest": self._make_random_forest_classifier() if is_classification else self._make_random_forest_regressor(),
-                "linear": LinearRegression() if not is_classification else None,
-            }
+            structured_candidates: Dict[str, Tuple[Any, Dict[str, List[Any]]]] = {}
+            if is_classification:
+                structured_candidates.update(
+                    {
+                        "logreg": (
+                            lambda **params: LogisticRegression(max_iter=600, **params),
+                            {"C": [0.5, 1.0, 2.0], "penalty": ["l2"], "solver": ["lbfgs"]},
+                        ),
+                        "random_forest": (
+                            lambda **params: self._make_random_forest_classifier(**params),
+                            {
+                                "n_estimators": [150, 300],
+                                "max_depth": [None, 10],
+                                "min_samples_leaf": [1, 2],
+                            },
+                        ),
+                        "gboost": (
+                            lambda **params: self._make_gradient_boosting_classifier(**params),
+                            {
+                                "n_estimators": [100, 200],
+                                "learning_rate": [0.05, 0.1],
+                                "max_depth": [2, 3],
+                            },
+                        ),
+                    }
+                )
+            else:
+                structured_candidates.update(
+                    {
+                        "random_forest": (
+                            lambda **params: self._make_random_forest_regressor(**params),
+                            {
+                                "n_estimators": [150, 300],
+                                "max_depth": [None, 10],
+                                "min_samples_leaf": [1, 2],
+                            },
+                        ),
+                        "gboost": (
+                            lambda **params: self._make_gradient_boosting_regressor(**params),
+                            {
+                                "n_estimators": [150, 250],
+                                "learning_rate": [0.05, 0.1],
+                                "max_depth": [2, 3],
+                            },
+                        ),
+                        "linear": (
+                            lambda **params: LinearRegression(**params),
+                            {},
+                        ),
+                    }
+                )
 
             X_train, X_test, y_train, y_test = train_test_split(X, y_encoded, test_size=0.2, random_state=42)
 
-            for name, model in structured_candidates.items():
-                if model is None:
-                    continue
-                pipeline = Pipeline([
-                    ("preprocess", preprocessor),
-                    ("model", model),
-                ])
-                metric_value, score_notes = self._fit_and_score_structured_model(
-                    pipeline, X_train, X_test, y_train, y_test, metric_name, label_encoder
-                )
-                leaderboard.append(
-                    CandidateScore(name=name, metric_name=metric_name, metric_value=metric_value, notes=score_notes)
-                )
+            for name, (factory, param_grid) in structured_candidates.items():
+                best_metric = float("-inf")
+                best_params: Dict[str, Any] = {}
+                best_notes: List[str] = []
+                for params in self._iter_param_grid(param_grid):
+                    model = factory(**params)
+                    pipeline = Pipeline([
+                        ("preprocess", preprocessor),
+                        ("model", model),
+                    ])
+                    metric_value, score_notes = self._fit_and_score_structured_model(
+                        pipeline, X_train, X_test, y_train, y_test, metric_name, label_encoder
+                    )
+                    if metric_value > best_metric:
+                        best_metric = metric_value
+                        best_params = params
+                        best_notes = score_notes
+                if best_metric > float("-inf"):
+                    best_structured_params[name] = best_params
+                    best_structured_factories[name] = factory
+                    leaderboard.append(
+                        CandidateScore(
+                            name=name,
+                            metric_name=metric_name,
+                            metric_value=best_metric,
+                            notes=best_notes + [f"Params: {best_params or 'default'}"],
+                        )
+                    )
+
+            if len(best_structured_params) >= 2:
+                ensemble_members = []
+                for candidate_name in ("logreg", "random_forest", "gboost", "linear"):
+                    if candidate_name in best_structured_params:
+                        estimator = best_structured_factories[candidate_name](
+                            **best_structured_params.get(candidate_name, {})
+                        )
+                        ensemble_members.append((candidate_name, estimator))
+
+                if len(ensemble_members) >= 2:
+                    ensemble_model = (
+                        VotingClassifier(ensemble_members, voting="soft")
+                        if is_classification
+                        else VotingRegressor(ensemble_members)
+                    )
+                    ensemble_pipeline = Pipeline([
+                        ("preprocess", preprocessor),
+                        ("model", ensemble_model),
+                    ])
+                    ensemble_metric, ensemble_notes = self._fit_and_score_structured_model(
+                        ensemble_pipeline,
+                        X_train,
+                        X_test,
+                        y_train,
+                        y_test,
+                        metric_name,
+                        label_encoder,
+                    )
+                    leaderboard.append(
+                        CandidateScore(
+                            name="auto_ensemble",
+                            metric_name=metric_name,
+                            metric_value=ensemble_metric,
+                            notes=ensemble_notes
+                            + [
+                                "Auto-ensemble voting across tuned base models.",
+                                f"Members: {[name for name, _ in ensemble_members]}",
+                            ],
+                        )
+                    )
 
         if not leaderboard:
             pivot.status = "failed"
@@ -739,13 +878,24 @@ class ModelBuilderNet:
         )
         return score, [f"Scored {score:.3f} using {metric_name}."]
 
-    def _make_random_forest_classifier(self) -> RandomForestClassifier:
-        return RandomForestClassifier(
-            n_estimators=200,
-            random_state=42,
-            max_depth=None,
-            min_samples_leaf=2,
-        )
+    def _iter_param_grid(self, grid: Dict[str, List[Any]]) -> List[Dict[str, Any]]:
+        if not grid:
+            return [{}]
+        keys = list(grid.keys())
+        return [dict(zip(keys, values)) for values in product(*grid.values())]
+
+    def _make_random_forest_classifier(self, **overrides: Any) -> RandomForestClassifier:
+        params = {
+            "n_estimators": 200,
+            "random_state": 42,
+            "max_depth": None,
+            "min_samples_leaf": 2,
+        }
+        params.update(overrides)
+        return RandomForestClassifier(**params)
+
+    def _make_gradient_boosting_classifier(self, **overrides: Any) -> GradientBoostingClassifier:
+        return GradientBoostingClassifier(random_state=42, **overrides)
 
     def _one_hot_encoder(self) -> OneHotEncoder:
         try:
@@ -753,13 +903,18 @@ class ModelBuilderNet:
         except TypeError:  # Backwards compatibility for older sklearn
             return OneHotEncoder(handle_unknown="ignore", sparse=False)
 
-    def _make_random_forest_regressor(self) -> RandomForestRegressor:
-        return RandomForestRegressor(
-            n_estimators=200,
-            random_state=42,
-            max_depth=None,
-            min_samples_leaf=2,
-        )
+    def _make_random_forest_regressor(self, **overrides: Any) -> RandomForestRegressor:
+        params = {
+            "n_estimators": 200,
+            "random_state": 42,
+            "max_depth": None,
+            "min_samples_leaf": 2,
+        }
+        params.update(overrides)
+        return RandomForestRegressor(**params)
+
+    def _make_gradient_boosting_regressor(self, **overrides: Any) -> GradientBoostingRegressor:
+        return GradientBoostingRegressor(random_state=42, **overrides)
 
 
 # ==========================================
