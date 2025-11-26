@@ -6,8 +6,9 @@ split, execute the download, and audit the result. The agents share a pivot
 object that acts as the single source of truth for decisions and logs.
 
 Usage:
-    python examples/hf_dataset_agent.py                     # uses Heart Disease train split
-    python examples/hf_dataset_agent.py ag_news None train  # different dataset and split
+    python examples/hf_dataset_agent.py                               # uses Heart Disease train split
+    python examples/hf_dataset_agent.py ag_news None train            # different dataset and split
+    python examples/hf_dataset_agent.py --save-dir runs/latest_run    # persist pivot + leaderboard
 
 Dependencies:
     pip install datasets
@@ -15,8 +16,11 @@ Dependencies:
 
 from __future__ import annotations
 
+import argparse
+import json
 from dataclasses import dataclass
 from itertools import product
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -984,6 +988,39 @@ def run_stella_loop(request: DatasetRequest) -> Tuple[Optional[Dataset], Dataset
     return dataset, pivot
 
 
+def save_pivot_reports(pivot: DatasetPivot, save_dir: Optional[Path]) -> None:
+    """Persist the pivot, leaderboard, and a small data sample for later review."""
+
+    if save_dir is None:
+        return
+
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    pivot_payload = pivot.model_dump(
+        exclude={"dataset_obj", "raw_dataframe", "cleaned_dataframe"}
+    )
+    (save_dir / "pivot.json").write_text(json.dumps(pivot_payload, indent=2))
+
+    df_to_save: Optional[pd.DataFrame]
+    if pivot.cleaned_dataframe is not None:
+        df_to_save = pivot.cleaned_dataframe
+    elif pivot.raw_dataframe is not None:
+        df_to_save = pivot.raw_dataframe
+    else:
+        df_to_save = None
+
+    if df_to_save is not None:
+        df_to_save.head(min(200, len(df_to_save))).to_csv(
+            save_dir / "data_sample.csv", index=False
+        )
+
+    if pivot.model_report and pivot.model_report.leaderboard:
+        leaderboard_df = pd.DataFrame(
+            [candidate.model_dump() for candidate in pivot.model_report.leaderboard]
+        )
+        leaderboard_df.to_csv(save_dir / "leaderboard.csv", index=False)
+
+
 # ==========================================
 # 4. DEMO ENTRYPOINT
 # ==========================================
@@ -994,8 +1031,13 @@ def main(
     config: Optional[str] = None,
     split: str = "train",
     sample_size: int = 400,
+    save_dir: Optional[Path] = None,
 ):
-    request = DatasetRequest(repo_id=repo_id, config=config, split=split, sample_size=sample_size)
+    normalized_config = None if config is None or str(config).lower() == "none" else config
+
+    request = DatasetRequest(
+        repo_id=repo_id, config=normalized_config, split=split, sample_size=sample_size
+    )
     dataset, pivot = run_stella_loop(request)
 
     if dataset is not None:
@@ -1032,16 +1074,36 @@ def main(
             for note in pivot.model_report.notes:
                 print(f"- {note}")
 
+    save_pivot_reports(pivot, save_dir)
+
     print("\n--- Action Log ---")
     for log in pivot.action_log:
         print(f"Step {log.step_id}: {log.code_executed} -> Success: {log.success}")
 
 
 if __name__ == "__main__":
-    import sys
+    parser = argparse.ArgumentParser(description="Run the HF STELLA AutoML agent")
+    parser.add_argument(
+        "repo_id",
+        nargs="?",
+        default="buio/heart-disease",
+        help="Hugging Face dataset repo id",
+    )
+    parser.add_argument("config", nargs="?", default=None, help="Dataset config (optional)")
+    parser.add_argument("split", nargs="?", default="train", help="Dataset split")
+    parser.add_argument(
+        "sample_size",
+        nargs="?",
+        type=int,
+        default=400,
+        help="Number of rows to sample for quick experiments",
+    )
+    parser.add_argument(
+        "--save-dir",
+        type=Path,
+        default=None,
+        help="Directory to persist pivot.json, leaderboard.csv, and a data_sample.csv",
+    )
 
-    repo = sys.argv[1] if len(sys.argv) > 1 else "buio/heart-disease"
-    cfg = sys.argv[2] if len(sys.argv) > 2 else None
-    split = sys.argv[3] if len(sys.argv) > 3 else "train"
-    sample = int(sys.argv[4]) if len(sys.argv) > 4 else 400
-    main(repo, cfg, split, sample)
+    args = parser.parse_args()
+    main(args.repo_id, args.config, args.split, args.sample_size, args.save_dir)

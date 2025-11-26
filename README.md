@@ -16,7 +16,9 @@ agentic framework for parsing agents
   lightweight hyperparameter sweeps, an auto-ensemble voting candidate, a
   leaderboard, and a held-out accuracy printout. You can still provide a
   different dataset, config, and split via CLI args (e.g., `python
-  examples/hf_dataset_agent.py ag_news None train`). Requires `pip install
-  datasets scikit-learn`.
+  examples/hf_dataset_agent.py ag_news None train`). Pass `--save-dir
+  runs/latest` to persist `pivot.json`, `data_sample.csv`, and
+  `leaderboard.csv` for post-run review. Requires `pip install datasets
+  scikit-learn`.
 - **Module entrypoint**: `python __main__.py` runs the Hugging Face dataset agent by
   default.
