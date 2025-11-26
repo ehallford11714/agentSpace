@@ -20,5 +20,11 @@ agentic framework for parsing agents
   runs/latest` to persist `pivot.json`, `data_sample.csv`, and
   `leaderboard.csv` for post-run review. Requires `pip install datasets
   scikit-learn`.
+- **Pivot embeddings + HellaSwag sanity check**: `python
+  examples/pivot_embeddings_hellaswag.py` computes pivot embeddings with a
+  small encoder, walks through a reasoning chain that realigns to the pivot, and
+  then runs a quick HellaSwag accuracy pass with a causal LM (default
+  `gpt2`) to ensure the model scores above zero. Requires `pip install datasets
+  transformers torch sentence-transformers`.
 - **Module entrypoint**: `python __main__.py` runs the Hugging Face dataset agent by
   default.
