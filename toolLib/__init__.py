@@ -14,5 +14,6 @@ __all__ = [
     'scheduling_tools',
     'utility_tools',
     'windows_actions',
-    'unix_actions'
+    'unix_actions',
+    'eda_tool'
 ]

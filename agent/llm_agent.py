@@ -1,8 +1,8 @@
-from ..agent.base_agent import BaseAgent
+from agent.base_agent import BaseAgent
 from openai import OpenAI
 from typing import Dict, Any, Optional
 import logging
-from ..utils.logging import get_logger
+from utils.logging import get_logger
 
 class LLMTool:
     """Tool for interacting with LLMs"""
