@@ -242,7 +242,7 @@ def main() -> None:
     parser.add_argument(
         "--eval-samples",
         type=int,
-        default=30,
+        default=300,
         help="Number of HellaSwag validation samples (0 or None for full set)",
     )
     parser.add_argument("--device", default="cpu", help="Torch device")

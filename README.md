@@ -25,7 +25,7 @@ agentic framework for parsing agents
   small encoder, walks through a reasoning chain that realigns to the pivot, and
   then runs both a control HellaSwag accuracy pass (causal LM log-likelihood) and
   a pivot-embedding cosine scorer for side-by-side accuracy deltas. Defaults to
-  30 validation samples; use `--eval-samples 0` for the full validation set or a
+  300 validation samples; use `--eval-samples 0` for the full validation set or a
   smaller integer for a quicker subset. Requires `pip install datasets
   transformers torch sentence-transformers`.
 - **Module entrypoint**: `python __main__.py` runs the Hugging Face dataset agent by
