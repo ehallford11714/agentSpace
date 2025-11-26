@@ -10,5 +10,9 @@ agentic framework for parsing agents
 - **Data cleansing workflow**: `python examples/data_cleansing_workflow.py` to see a
   scan-plan-act-audit loop that cleans a toy dataframe using simple cooperative
   agents.
-- **Module entrypoint**: `python __main__.py` runs the data cleansing workflow by
+- **Hugging Face dataset agent**: `python examples/hf_dataset_agent.py` to fetch a
+  public dataset (e.g., `ag_news` or `imdb`) using a STELLA-inspired loop that
+  scouts metadata, plans, executes, and audits a download. Requires `pip install
+  datasets`.
+- **Module entrypoint**: `python __main__.py` runs the Hugging Face dataset agent by
   default.

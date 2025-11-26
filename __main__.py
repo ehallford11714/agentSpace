@@ -1,4 +1,4 @@
-from examples.data_cleansing_workflow import main as example_main
+from examples.hf_dataset_agent import main as example_main
 
 def main():
     """Main entry point for the agent"""
