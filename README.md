@@ -12,7 +12,8 @@ agentic framework for parsing agents
   agents.
 - **Hugging Face dataset agent**: `python examples/hf_dataset_agent.py` to fetch a
   public dataset (e.g., `ag_news` or `imdb`) using a STELLA-inspired loop that
-  scouts metadata, plans, executes, and audits a download. Requires `pip install
-  datasets`.
+  scouts metadata, plans, executes, audits a download, and then runs an EDA
+  analyst to surface descriptive stats, correlations, and distribution insights.
+  Requires `pip install datasets`.
 - **Module entrypoint**: `python __main__.py` runs the Hugging Face dataset agent by
   default.

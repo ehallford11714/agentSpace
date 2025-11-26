@@ -16,10 +16,11 @@ Dependencies:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
+import pandas as pd
 from datasets import Dataset, get_dataset_config_names, get_dataset_split_names, load_dataset
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ==========================================
@@ -66,15 +67,27 @@ class DatasetSnapshot(BaseModel):
     columns: List[str]
 
 
+class EDAReport(BaseModel):
+    descriptive_stats: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    missing_counts: Dict[str, int] = Field(default_factory=dict)
+    correlations: List[Dict[str, float]] = Field(default_factory=list)
+    distributions: Dict[str, Dict[str, float]] = Field(default_factory=dict)
+    insights: List[str] = Field(default_factory=list)
+
+
 class DatasetPivot(BaseModel):
     """Single source of truth for the dataset retrieval agents."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     pivot_id: str
     request: DatasetRequest
     available_configs: List[str] = Field(default_factory=list)
     available_splits: Dict[str, List[str]] = Field(default_factory=dict)
 
+    dataset_obj: Optional[Dataset] = Field(default=None, exclude=True)
     dataset: Optional[DatasetSnapshot] = None
+    eda_report: Optional[EDAReport] = None
     known_issues: List[Issue] = Field(default_factory=list)
     current_plan: Optional[PlanStep] = None
     action_log: List[ActionLog] = Field(default_factory=list)
@@ -182,6 +195,9 @@ class StrategistNet:
         elif issue.issue_type == "not_retrieved":
             description = "Download the requested dataset split and trim to sample size."
             action = "download_dataset"
+        elif issue.issue_type == "eda_pending":
+            description = "Run exploratory data analysis on the retrieved split."
+            action = "run_eda"
         elif issue.issue_type == "repo_not_found":
             description = "Stop because the dataset repository is unavailable."
             action = "abort"
@@ -203,12 +219,12 @@ class StrategistNet:
 class OperatorNet:
     """Executor: perform the planned action."""
 
-    def run(self, pivot: DatasetPivot) -> Tuple[Optional[Dataset], DatasetPivot]:
+    def run(self, pivot: DatasetPivot, dataset: Optional[Dataset]) -> Tuple[Optional[Dataset], DatasetPivot]:
         plan = pivot.current_plan
         if plan is None:
             raise ValueError("No plan to execute")
 
-        dataset: Optional[Dataset] = None
+        dataset = dataset or pivot.dataset_obj
         print(f"🔧 [Operator] Action: {plan.description}")
 
         try:
@@ -236,8 +252,13 @@ class OperatorNet:
                     num_rows=len(dataset),
                     columns=list(dataset.features.keys()),
                 )
+                pivot.dataset_obj = dataset
                 code = "dataset = load_dataset(...); optional select(sample_size)"
                 pivot.status = "auditing"
+            elif plan.action_type == "run_eda":
+                dataset = dataset  # carry forward existing dataset reference
+                code = "trigger_eda"
+                pivot.status = "analyzing"
             else:
                 code = "abort"
                 pivot.status = "failed"
@@ -289,7 +310,93 @@ class AuditorNet:
             f"✅ [Auditor] Retrieved {pivot.dataset.num_rows} rows "
             f"with columns: {', '.join(pivot.dataset.columns)}"
         )
+        if not any(issue.issue_type == "eda_pending" for issue in pivot.known_issues):
+            pivot.known_issues.append(
+                Issue(
+                    id="issue_eda",
+                    issue_type="eda_pending",
+                    severity="medium",
+                    description="Exploratory analysis has not been generated yet.",
+                )
+            )
+        pivot.status = "planning"
+        return pivot
+
+
+class EdaNet:
+    """Analyst: compute exploratory statistics and derive insights."""
+
+    def run(self, dataset: Dataset, pivot: DatasetPivot) -> DatasetPivot:
+        print("📊 [EDA] Performing exploratory data analysis...")
+        df = dataset.to_pandas()
+
+        describe_df = df.describe(include="all").transpose()
+        descriptive_stats: Dict[str, Dict[str, float]] = {
+            column: {
+                stat: (value if pd.notna(value) else None)
+                for stat, value in stats.items()
+            }
+            for column, stats in describe_df.to_dict(orient="index").items()
+        }
+
+        missing_counts = df.isnull().sum().to_dict()
+
+        correlations: List[Dict[str, float]] = []
+        corr_matrix = df.select_dtypes(include=["number", "bool"]).corr(numeric_only=True)
+        for i, col_i in enumerate(corr_matrix.columns):
+            for col_j in corr_matrix.columns[i + 1 :]:
+                value = corr_matrix.loc[col_i, col_j]
+                if pd.notna(value):
+                    correlations.append({"pair": f"{col_i}~{col_j}", "pearson": float(value)})
+
+        distributions: Dict[str, Dict[str, float]] = {}
+        for column in df.columns:
+            series = df[column]
+            if pd.api.types.is_numeric_dtype(series) or pd.api.types.is_bool_dtype(series):
+                dist = series.value_counts(bins=8, normalize=True, dropna=False)
+            else:
+                dist = series.value_counts(normalize=True, dropna=False).head(10)
+            distributions[column] = {str(bin_label): float(freq) for bin_label, freq in dist.items()}
+
+        insights: List[str] = []
+        for column, count in missing_counts.items():
+            if count > 0:
+                insights.append(f"Column '{column}' has {count} missing values.")
+
+        for corr in correlations:
+            if abs(corr["pearson"]) >= 0.5:
+                insights.append(
+                    f"Strong correlation detected between {corr['pair']} (pearson={corr['pearson']:.2f})."
+                )
+
+        for column in df.select_dtypes(include=["number", "bool"]).columns:
+            skew = df[column].skew()
+            if pd.notna(skew) and abs(skew) > 1:
+                direction = "right" if skew > 0 else "left"
+                insights.append(f"Column '{column}' shows a {direction}-skewed distribution (skew={skew:.2f}).")
+
+        pivot.eda_report = EDAReport(
+            descriptive_stats=descriptive_stats,
+            missing_counts=missing_counts,
+            correlations=correlations,
+            distributions=distributions,
+            insights=insights or ["No major data quality signals detected in EDA."],
+        )
+
+        pivot.known_issues = [issue for issue in pivot.known_issues if issue.issue_type != "eda_pending"]
+        pivot.current_plan = None
         pivot.status = "completed"
+
+        pivot.action_log.append(
+            ActionLog(
+                step_id=len(pivot.action_log) + 1,
+                code_executed="pandas describe + correlations + distributions",
+                success=True,
+                rows_affected=pivot.dataset.num_rows if pivot.dataset else 0,
+            )
+        )
+
+        print("✅ [EDA] Analysis complete; insights ready in pivot.\n")
         return pivot
 
 
@@ -308,6 +415,7 @@ def run_stella_loop(request: DatasetRequest) -> Tuple[Optional[Dataset], Dataset
     strategist = StrategistNet()
     operator = OperatorNet()
     auditor = AuditorNet()
+    analyst = EdaNet()
 
     dataset: Optional[Dataset] = None
     steps = 0
@@ -324,9 +432,16 @@ def run_stella_loop(request: DatasetRequest) -> Tuple[Optional[Dataset], Dataset
         elif pivot.status == "planning":
             pivot = strategist.run(pivot)
         elif pivot.status == "executing":
-            dataset, pivot = operator.run(pivot)
+            dataset, pivot = operator.run(pivot, dataset)
         elif pivot.status == "auditing":
             pivot = auditor.run(pivot)
+        elif pivot.status == "analyzing":
+            active_dataset = dataset or pivot.dataset_obj
+            if active_dataset is None:
+                pivot.status = "failed"
+                print("❌ [EDA] No dataset available for analysis.")
+            else:
+                pivot = analyst.run(active_dataset, pivot)
 
     if pivot.status == "completed":
         print("\n✨ Dataset retrieved successfully!")
@@ -348,6 +463,11 @@ def main(repo_id: str = "ag_news", config: Optional[str] = None, split: str = "t
     if dataset is not None:
         print("\n--- Sample rows ---")
         print(dataset.to_pandas().head())
+
+    if pivot.eda_report is not None:
+        print("\n--- EDA Insights ---")
+        for insight in pivot.eda_report.insights:
+            print(f"- {insight}")
 
     print("\n--- Action Log ---")
     for log in pivot.action_log:
