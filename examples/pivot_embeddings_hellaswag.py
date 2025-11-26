@@ -1,23 +1,28 @@
-"""Pivot embedding demo plus a HellaSwag sanity check with a real model.
+"""Pivot embedding demo plus a HellaSwag control vs. pivot comparison.
 
 This script stitches together two ideas:
 1) Pivot embeddings to keep multi-step reasoning centered on a goal.
-2) A quick HellaSwag benchmark using a small causal LM so we can confirm a
-   non-zero accuracy with an actual model (default: gpt2).
+2) A HellaSwag benchmark that runs **two** evaluators:
+   - Control: causal LM log-likelihood over endings (default: gpt2)
+   - Pivot: cosine alignment between a pivot embedding of the prompt and each
+            ending (uses a sentence-transformer)
 
 Usage examples:
-    python examples/pivot_embeddings_hellaswag.py
-    python examples/pivot_embeddings_hellaswag.py --model gpt2 --eval-samples 64
+    # Full validation set with both evaluators
+    python examples/pivot_embeddings_hellaswag.py --eval-samples 0 --device cpu
+
+    # Quick smoke test on a subset
+    python examples/pivot_embeddings_hellaswag.py --eval-samples 32
 
 Dependencies:
-    pip install datasets transformers torch
+    pip install datasets transformers torch sentence-transformers
 """
 
 from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from typing import Iterable, List, Sequence, Tuple
+from typing import Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -147,7 +152,7 @@ def score_ending(
 
 def evaluate_hellaswag(
     model_name: str = "gpt2",
-    max_samples: int = 32,
+    max_samples: Optional[int] = 32,
     device: str = "cpu",
 ) -> float:
     print(f"🚀 [HellaSwag] Loading model {model_name} on {device}...")
@@ -157,8 +162,9 @@ def evaluate_hellaswag(
     model = AutoModelForCausalLM.from_pretrained(model_name).to(device)
     model.eval()
 
-    print(f"📦 [HellaSwag] Fetching first {max_samples} validation samples...")
-    dataset = load_dataset("hellaswag", split=f"validation[:{max_samples}]")
+    split = "validation" if max_samples in (None, 0) else f"validation[:{max_samples}]"
+    print(f"📦 [HellaSwag] Fetching split '{split}'...")
+    dataset = load_dataset("hellaswag", split=split)
 
     correct = 0
     for example in dataset:
@@ -171,6 +177,30 @@ def evaluate_hellaswag(
 
     accuracy = correct / len(dataset)
     print(f"✅ [HellaSwag] Accuracy: {accuracy:.3f} over {len(dataset)} samples")
+    return accuracy
+
+
+def evaluate_hellaswag_with_pivot(
+    encoder: EmbeddingBackend,
+    max_samples: Optional[int] = 32,
+) -> float:
+    split = "validation" if max_samples in (None, 0) else f"validation[:{max_samples}]"
+    print(f"📦 [PivotEval] Fetching split '{split}' for embedding-based scoring...")
+    dataset = load_dataset("hellaswag", split=split)
+
+    correct = 0
+    for example in dataset:
+        context = (example["ctx_a"] + " " + example["ctx_b"]).strip()
+        pivot = compute_pivot_embedding(prompt=context, history_summary="", task_type="analysis", encoder=encoder)
+        endings: Sequence[str] = example["endings"]
+        ending_embeddings = encoder.encode(endings)
+        sims = [cosine_similarity(pivot, emb) for emb in ending_embeddings]
+        prediction = int(np.argmax(sims))
+        if prediction == int(example["label"]):
+            correct += 1
+
+    accuracy = correct / len(dataset)
+    print(f"✅ [PivotEval] Accuracy: {accuracy:.3f} over {len(dataset)} samples")
     return accuracy
 
 
@@ -209,13 +239,24 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Pivot embedding demo + HellaSwag check")
     parser.add_argument("--model", default="gpt2", help="Causal LM to score HellaSwag endings")
     parser.add_argument("--embedder", default="sentence-transformers/all-MiniLM-L6-v2", help="Embedding model for pivot alignment")
-    parser.add_argument("--eval-samples", type=int, default=32, help="Number of HellaSwag validation samples")
+    parser.add_argument(
+        "--eval-samples",
+        type=int,
+        default=32,
+        help="Number of HellaSwag validation samples (0 or None for full set)",
+    )
     parser.add_argument("--device", default="cpu", help="Torch device")
     args = parser.parse_args()
 
     encoder = EmbeddingBackend(model_name=args.embedder)
     demo_pivot_chain(encoder)
-    evaluate_hellaswag(model_name=args.model, max_samples=args.eval_samples, device=args.device)
+    lm_acc = evaluate_hellaswag(model_name=args.model, max_samples=args.eval_samples, device=args.device)
+    pivot_acc = evaluate_hellaswag_with_pivot(encoder=encoder, max_samples=args.eval_samples)
+    delta = pivot_acc - lm_acc
+    print("\n=== CONTROL VS. PIVOT SUMMARY ===")
+    print(f"Control (LM) accuracy : {lm_acc:.3f}")
+    print(f"Pivot embed accuracy  : {pivot_acc:.3f}")
+    print(f"Delta                 : {delta:+.3f}")
 
 
 if __name__ == "__main__":
