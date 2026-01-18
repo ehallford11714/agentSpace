@@ -1,6 +1,7 @@
 from typing import Dict, Any, Type, Optional
-from abc import ABC
+from abc import ABC, abstractmethod
 import inspect
+
 
 class ToolRegistry:
     """Registry for managing tools"""
@@ -95,6 +96,14 @@ class ToolRegistry:
             
         required_methods = ['execute', 'validate']
         return all(hasattr(tool_class, method) for method in required_methods)
+
+
+def register_default_tools(registry: 'ToolRegistry') -> None:
+    """Register built-in tools with a registry instance."""
+
+    from .eda_tool import EDATool
+
+    registry.register_tool('eda_tool', EDATool)
 
 class ToolBase(ABC):
     """Base class for all tools"""
