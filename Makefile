@@ -1,4 +1,4 @@
-.PHONY: up down logs lint test
+.PHONY: up down logs lint test db-migrate db-upgrade
 
 up:
 	docker compose up --build
@@ -14,3 +14,9 @@ lint:
 
 test:
 	@echo "Test targets will be defined as tasks are implemented."
+
+db-migrate:
+	alembic -c backend/alembic.ini revision --autogenerate -m "$(name)"
+
+db-upgrade:
+	alembic -c backend/alembic.ini upgrade head
