@@ -1,9 +1,8 @@
 from typing import Dict, Any, Optional, List
 from abc import ABC, abstractmethod
 from datetime import datetime
-import logging
-from ..utils.logging import get_logger
-from ..toolLib.tool_registry import ToolRegistry
+from utils.logging import get_logger
+from toolLib.tool_registry import ToolRegistry
 
 class Task(ABC):
     """Base class for workflow tasks"""
@@ -32,13 +31,14 @@ class Task(ABC):
         }
     
     @abstractmethod
-    def execute(self, tool_registry: 'ToolRegistry') -> Dict[str, Any]:
+    def execute(self, tool_registry: 'ToolRegistry', workflow_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Execute the task
-        
+
         Args:
             tool_registry (ToolRegistry): Registry of available tools
-            
+            workflow_context (Optional[Dict[str, Any]]): Context of workflow execution for dependent data
+
         Returns:
             Dict[str, Any]: Task execution result
             
@@ -72,13 +72,50 @@ class Task(ABC):
             result (Optional[Any]): Task result
             error (Optional[Exception]): Error if any
         """
+        now = datetime.now().isoformat()
         self.state['status'] = status
-        self.state['end_time'] = datetime.now()
-        if result:
+
+        if status == 'running':
+            self.state['start_time'] = now
+
+        if status in {'completed', 'failed', 'blocked', 'skipped'}:
+            self.state['end_time'] = now
+
+        if result is not None:
             self.state['result'] = result
-        if error:
+        if error is not None:
             self.state['error'] = str(error)
     
     def __str__(self) -> str:
         """String representation of the task"""
         return f"Task(name={self.name}, tool={self.tool}, status={self.state['status']})"
+
+
+class RegisteredToolTask(Task):
+    """Concrete task that executes a registered tool from the ToolRegistry."""
+
+    def execute(self, tool_registry: 'ToolRegistry', workflow_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        self.update_state('running')
+        try:
+            tool_class = tool_registry.get_tool_class(self.tool)
+            if not tool_class:
+                raise ValueError(f"Tool '{self.tool}' is not registered")
+
+            tool_instance = tool_registry.get_tool_instance(self.tool) or tool_registry.create_tool_instance(
+                self.tool, self.parameters.get('config', {})
+            )
+
+            execution_payload = {**self.parameters, 'context': workflow_context or {}, 'task_name': self.name}
+
+            if hasattr(tool_instance, 'validate') and not tool_instance.validate(execution_payload):
+                raise ValueError(f"Validation failed for tool '{self.tool}' with parameters {execution_payload}")
+
+            result = tool_instance.execute(execution_payload)
+            self.update_state('completed', result=result)
+        except Exception as exc:  # pragma: no cover - defensive logging wrapper
+            self.update_state('failed', error=exc)
+            self.logger.error("Task execution failed", error=str(exc), task=self.name)
+            raise
+
+        self.logger.info("Task completed", task=self.name, result=self.state['result'])
+        return self.state

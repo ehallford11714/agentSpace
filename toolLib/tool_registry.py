@@ -1,5 +1,5 @@
 from typing import Dict, Any, Type, Optional
-from abc import ABC
+from abc import ABC, abstractmethod
 import inspect
 
 class ToolRegistry:
